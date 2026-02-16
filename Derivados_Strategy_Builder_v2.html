@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Constructor de Estrategias con Derivados, por Alvaro Urien</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: Calibri, 'Segoe UI', sans-serif; background: #F0F4F8; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #F0F4F8; }
+    ::-webkit-scrollbar-thumb { background: #94A3B8; border-radius: 3px; }
+    select, input, button { font-family: inherit; }
+    button:focus, select:focus, input:focus { outline: 2px solid #00B4D8; outline-offset: 1px; }
+    @keyframes fadeIn { from{opacity:0;transform:scale(0.95)} to{opacity:1;transform:scale(1)} }
+    @keyframes overlayIn { from{opacity:0} to{opacity:1} }
+    .modal-overlay { animation: overlayIn 0.2s ease; }
+    .modal-box { animation: fadeIn 0.25s ease; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useCallback, useMemo, useEffect, useRef } = React;
+
+    /* ══════════════════════════════════════
+       CONSTANTS
+       ══════════════════════════════════════ */
+    const C = {
+      navy:"#0F1B3D", deepBlue:"#1A2E5A", midBlue:"#2C4A7C",
+      accent:"#00B4D8", gold:"#F0A500", white:"#FFFFFF",
+      offWhite:"#F0F4F8", lightGray:"#E2E8F0", medGray:"#94A3B8",
+      darkText:"#1E293B", bodyText:"#334155",
+      green:"#10B981", red:"#EF4444", orange:"#F59E0B",
+      lightBlue:"#DBEAFE", lightCyan:"#E0F7FA",
+    };
+    const IC = ["#00B4D8","#F0A500","#10B981","#EF4444","#8B5CF6","#EC4899","#F97316","#06B6D4","#84CC16","#6366F1"];
+    const TYPES = [
+      {v:"call",l:"Call",i:"📈"},{v:"put",l:"Put",i:"📉"},
+      {v:"forward",l:"Forward",i:"📊"},{v:"stock",l:"Acción",i:"🏛️"},{v:"bond",l:"Bono",i:"💰"},
+    ];
+    const PRESETS = [
+      {name:"Bull Call Spread",desc:"Compra call K bajo + vende call K alto",
+        ins:[{type:"call",position:"long",strike:100,premium:8,quantity:1},{type:"call",position:"short",strike:110,premium:3,quantity:1}]},
+      {name:"Bear Put Spread",desc:"Compra put K alto + vende put K bajo",
+        ins:[{type:"put",position:"long",strike:110,premium:8,quantity:1},{type:"put",position:"short",strike:100,premium:3,quantity:1}]},
+      {name:"Straddle (Long)",desc:"Compra call + compra put mismo K",
+        ins:[{type:"call",position:"long",strike:100,premium:6,quantity:1},{type:"put",position:"long",strike:100,premium:5,quantity:1}]},
+      {name:"Strangle (Long)",desc:"Compra call K alto + compra put K bajo",
+        ins:[{type:"call",position:"long",strike:110,premium:3,quantity:1},{type:"put",position:"long",strike:90,premium:3,quantity:1}]},
+      {name:"Protective Put",desc:"Acción + compra put",
+        ins:[{type:"stock",position:"long",strike:100,premium:0,quantity:1},{type:"put",position:"long",strike:95,premium:4,quantity:1}]},
+      {name:"Covered Call",desc:"Acción + venta call",
+        ins:[{type:"stock",position:"long",strike:100,premium:0,quantity:1},{type:"call",position:"short",strike:110,premium:5,quantity:1}]},
+      {name:"Butterfly",desc:"1 call K1 + 2 short call K2 + 1 call K3",
+        ins:[{type:"call",position:"long",strike:90,premium:12,quantity:1},{type:"call",position:"short",strike:100,premium:6,quantity:2},{type:"call",position:"long",strike:110,premium:3,quantity:1}]},
+      {name:"Iron Condor",desc:"Vende put/call centrales, compra alas",
+        ins:[{type:"put",position:"short",strike:85,premium:2,quantity:1},{type:"put",position:"long",strike:90,premium:3,quantity:1},{type:"call",position:"short",strike:110,premium:3,quantity:1},{type:"call",position:"long",strike:115,premium:2,quantity:1}]},
+      {name:"Collar",desc:"Acción + compra put + venta call",
+        ins:[{type:"stock",position:"long",strike:100,premium:0,quantity:1},{type:"put",position:"long",strike:95,premium:3,quantity:1},{type:"call",position:"short",strike:110,premium:3,quantity:1}]},
+      {name:"Cash & Carry",desc:"Compra acción + venta forward",
+        ins:[{type:"stock",position:"long",strike:100,premium:0,quantity:1},{type:"forward",position:"short",strike:103,premium:0,quantity:1}]},
+    ];
+
+    /* ══════════════════════════════════════
+       BLACK-SCHOLES
+       ══════════════════════════════════════ */
+    // Cumulative standard normal via Abramowitz & Stegun approximation
+    function cdf(x) {
+      if (x === 0) return 0.5;
+      const a1=0.254829592, a2=-0.284496736, a3=1.421413741, a4=-1.453152027, a5=1.061405429, p=0.3275911;
+      const sign = x < 0 ? -1 : 1;
+      const ax = Math.abs(x) / Math.SQRT2;
+      const t = 1.0 / (1.0 + p * ax);
+      const erf = 1 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1) * t * Math.exp(-ax*ax);
+      return 0.5 * (1 + sign * erf);
+    }
+
+    function blackScholes(S, K, r, q, sigma, T, type) {
+      if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) return NaN;
+      const d1 = (Math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
+      const d2 = d1 - sigma * Math.sqrt(T);
+      if (type === "call") {
+        return S * Math.exp(-q * T) * cdf(d1) - K * Math.exp(-r * T) * cdf(d2);
+      } else {
+        return K * Math.exp(-r * T) * cdf(-d2) - S * Math.exp(-q * T) * cdf(-d1);
+      }
+    }
+
+    // Greeks
+    function bsGreeks(S, K, r, q, sigma, T, type) {
+      if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) return {};
+      const sqrtT = Math.sqrt(T);
+      const d1 = (Math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * sqrtT);
+      const d2 = d1 - sigma * sqrtT;
+      const nd1 = Math.exp(-0.5 * d1 * d1) / Math.sqrt(2 * Math.PI); // pdf(d1)
+      const eqT = Math.exp(-q * T);
+      const erT = Math.exp(-r * T);
+
+      let delta, theta, rho;
+      if (type === "call") {
+        delta = eqT * cdf(d1);
+        theta = (-S * eqT * nd1 * sigma / (2 * sqrtT)) - r * K * erT * cdf(d2) + q * S * eqT * cdf(d1);
+        rho = K * T * erT * cdf(d2);
+      } else {
+        delta = eqT * (cdf(d1) - 1);
+        theta = (-S * eqT * nd1 * sigma / (2 * sqrtT)) + r * K * erT * cdf(-d2) - q * S * eqT * cdf(-d1);
+        rho = -K * T * erT * cdf(-d2);
+      }
+      const gamma = eqT * nd1 / (S * sigma * sqrtT);
+      const vega = S * eqT * nd1 * sqrtT;
+      return { delta, gamma, vega: vega / 100, theta: theta / 365, rho: rho / 100 };
+    }
+
+    /* ══════════════════════════════════════
+       HELPERS
+       ══════════════════════════════════════ */
+    let _id = 0;
+    function mkInst(o={}) {
+      return {id:++_id,type:"call",position:"long",strike:100,premium:5,quantity:1,bondRate:3,bondFace:100,...o};
+    }
+    function poff(inst,S) {
+      const q=inst.quantity||1, sign=inst.position==="long"?1:-1;
+      switch(inst.type){
+        case "call": return sign*(Math.max(S-inst.strike,0)-inst.premium)*q;
+        case "put":  return sign*(Math.max(inst.strike-S,0)-inst.premium)*q;
+        case "forward": return sign*(S-inst.strike)*q;
+        case "stock": return sign*(S-inst.strike)*q;
+        case "bond": return sign*(inst.bondFace||100)*(1+(inst.bondRate||3)/100)*q;
+        default: return 0;
+      }
+    }
+    function lbl(inst) {
+      const p=inst.position==="long"?"Compra":"Venta";
+      const q=inst.quantity>1?inst.quantity+"× ":"";
+      switch(inst.type){
+        case "call": return q+p+" Call K="+inst.strike;
+        case "put": return q+p+" Put K="+inst.strike;
+        case "forward": return q+p+" Forward F="+inst.strike;
+        case "stock": return q+p+" Acción S₀="+inst.strike;
+        case "bond": return q+p+" Bono ("+inst.bondRate+"%)";
+        default: return "";
+      }
+    }
+
+    /* ══════════════════════════════════════
+       BLACK-SCHOLES MODAL
+       ══════════════════════════════════════ */
+    function BSModal({ open, onClose, instruments, onApply }) {
+      const [spot, setSpot] = useState(100);
+      const [rate, setRate] = useState(3);
+      const [divY, setDivY] = useState(0);
+      const [vol, setVol] = useState(25);
+      const [T, setT] = useState(0.5);
+      const modalRef = useRef(null);
+
+      useEffect(() => {
+        if (open && modalRef.current) modalRef.current.focus();
+      }, [open]);
+
+      useEffect(() => {
+        const handleKey = (e) => { if (e.key === "Escape") onClose(); };
+        if (open) window.addEventListener("keydown", handleKey);
+        return () => window.removeEventListener("keydown", handleKey);
+      }, [open, onClose]);
+
+      const results = useMemo(() => {
+        const r = rate / 100, q = divY / 100, sigma = vol / 100;
+        return instruments.filter(i => i.type === "call" || i.type === "put").map((inst, idx) => {
+          const price = blackScholes(spot, inst.strike, r, q, sigma, T, inst.type);
+          const greeks = bsGreeks(spot, inst.strike, r, q, sigma, T, inst.type);
+          return { inst, price, greeks, idx };
+        });
+      }, [instruments, spot, rate, divY, vol, T]);
+
+      const optionCount = instruments.filter(i => i.type === "call" || i.type === "put").length;
+
+      if (!open) return null;
+
+      const is = { padding:"6px 8px",borderRadius:6,border:"1px solid "+C.lightGray,fontSize:14,fontFamily:"Calibri",width:"100%" };
+      const ls = { display:"flex",flexDirection:"column",gap:3,fontSize:11,color:C.medGray,fontWeight:"bold",flex:1 };
+
+      return (
+        <div className="modal-overlay" onClick={onClose}
+          style={{position:"fixed",inset:0,background:"rgba(15,27,61,0.6)",backdropFilter:"blur(4px)",
+            zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+          <div className="modal-box" ref={modalRef} tabIndex={-1}
+            onClick={e=>e.stopPropagation()}
+            style={{background:C.white,borderRadius:14,maxWidth:720,width:"100%",
+              maxHeight:"90vh",overflow:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.3)"}}>
+
+            {/* Header */}
+            <div style={{background:"linear-gradient(135deg,"+C.navy+","+C.deepBlue+")",
+              padding:"16px 24px",borderRadius:"14px 14px 0 0",
+              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{color:C.white,fontSize:18,fontWeight:"bold",fontFamily:"Trebuchet MS"}}>
+                  ⚡ Calculadora Black-Scholes
+                </div>
+                <div style={{color:C.medGray,fontSize:11,marginTop:2}}>
+                  Calcula automáticamente las primas de todas las opciones de tu estrategia
+                </div>
+              </div>
+              <button onClick={onClose}
+                style={{background:"rgba(255,255,255,0.1)",border:"none",color:C.white,
+                  fontSize:20,width:32,height:32,borderRadius:8,cursor:"pointer",
+                  display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+            </div>
+
+            <div style={{padding:"20px 24px"}}>
+              {/* Formula display */}
+              <div style={{background:C.offWhite,borderRadius:10,padding:"12px 16px",marginBottom:16,
+                border:"1px solid "+C.lightGray}}>
+                <div style={{fontSize:11,color:C.medGray,fontWeight:"bold",textTransform:"uppercase",
+                  letterSpacing:0.5,marginBottom:6}}>Modelo</div>
+                <div style={{fontFamily:"Georgia,serif",fontSize:14,color:C.darkText,lineHeight:1.8}}>
+                  <strong>Call</strong>: C = S₀·e<sup>−qT</sup>·N(d₁) − K·e<sup>−rT</sup>·N(d₂)
+                  <br/>
+                  <strong>Put</strong>: P = K·e<sup>−rT</sup>·N(−d₂) − S₀·e<sup>−qT</sup>·N(−d₁)
+                  <br/>
+                  <span style={{fontSize:13,color:C.bodyText}}>
+                    d₁ = [ln(S₀/K) + (r − q + σ²/2)·T] / (σ·√T) &nbsp;&nbsp;|&nbsp;&nbsp; d₂ = d₁ − σ·√T
+                  </span>
+                </div>
+              </div>
+
+              {/* Input parameters */}
+              <div style={{fontSize:11,fontWeight:"bold",color:C.medGray,textTransform:"uppercase",
+                letterSpacing:0.5,marginBottom:8}}>Parámetros de mercado</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginBottom:20}}>
+                <label style={ls}>
+                  <span>Spot (S₀)</span>
+                  <input type="number" value={spot} min="0.01" step="1"
+                    onChange={e=>setSpot(parseFloat(e.target.value)||0.01)} style={is}/>
+                </label>
+                <label style={ls}>
+                  <span>Tipo interés r (%)</span>
+                  <input type="number" value={rate} step="0.1"
+                    onChange={e=>setRate(parseFloat(e.target.value)||0)} style={is}/>
+                </label>
+                <label style={ls}>
+                  <span>Dividendo q (%)</span>
+                  <input type="number" value={divY} min="0" step="0.1"
+                    onChange={e=>setDivY(parseFloat(e.target.value)||0)} style={is}/>
+                </label>
+                <label style={ls}>
+                  <span>Volatilidad σ (%)</span>
+                  <input type="number" value={vol} min="0.1" step="1"
+                    onChange={e=>setVol(parseFloat(e.target.value)||0.1)}
+                    style={{...is,background:"#FFFBEB",border:"1px solid "+C.gold}}/>
+                </label>
+                <label style={ls}>
+                  <span>Plazo T (años)</span>
+                  <input type="number" value={T} min="0.01" step="0.05"
+                    onChange={e=>setT(parseFloat(e.target.value)||0.01)} style={is}/>
+                </label>
+              </div>
+
+              {/* Results */}
+              {optionCount === 0 ? (
+                <div style={{textAlign:"center",padding:"30px 20px",color:C.medGray,fontSize:14}}>
+                  No hay opciones (Call/Put) en la estrategia actual.<br/>
+                  Añade al menos una opción para usar Black-Scholes.
+                </div>
+              ) : (
+                <>
+                  <div style={{fontSize:11,fontWeight:"bold",color:C.medGray,textTransform:"uppercase",
+                    letterSpacing:0.5,marginBottom:8}}>Resultados por opción</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
+                    {results.map((r,i) => {
+                      const ci = instruments.indexOf(r.inst);
+                      const color = IC[ci % IC.length];
+                      const priceOk = !isNaN(r.price) && isFinite(r.price);
+                      return (
+                        <div key={r.inst.id}
+                          style={{border:"2px solid "+color+"30",borderLeft:"4px solid "+color,
+                            borderRadius:10,padding:"12px 16px",background:C.white}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                            <div>
+                              <span style={{fontWeight:"bold",color,fontSize:13}}>#{ci+1} </span>
+                              <span style={{fontWeight:"bold",color:C.darkText,fontSize:13}}>
+                                {lbl(r.inst)}
+                              </span>
+                            </div>
+                            <div style={{display:"flex",alignItems:"center",gap:8}}>
+                              <div style={{textAlign:"right"}}>
+                                <div style={{fontSize:10,color:C.medGray}}>Prima B-S</div>
+                                <div style={{fontSize:22,fontWeight:"bold",
+                                  color:priceOk?C.accent:C.red,fontFamily:"Consolas,monospace"}}>
+                                  {priceOk ? r.price.toFixed(4) : "Error"}
+                                </div>
+                              </div>
+                              {priceOk && (
+                                <div style={{fontSize:10,color:C.medGray,background:C.offWhite,
+                                  borderRadius:4,padding:"2px 6px"}}>
+                                  actual: {r.inst.premium}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          {/* Greeks */}
+                          {priceOk && r.greeks && (
+                            <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
+                              {[
+                                {l:"Delta (Δ)",v:r.greeks.delta,f:4},
+                                {l:"Gamma (Γ)",v:r.greeks.gamma,f:5},
+                                {l:"Vega (ν)",v:r.greeks.vega,f:4},
+                                {l:"Theta (Θ)",v:r.greeks.theta,f:4},
+                                {l:"Rho (ρ)",v:r.greeks.rho,f:4},
+                              ].map((g,gi)=>(
+                                <div key={gi} style={{background:C.offWhite,borderRadius:6,padding:"5px 8px",textAlign:"center"}}>
+                                  <div style={{fontSize:9,color:C.medGray,fontWeight:"bold"}}>{g.l}</div>
+                                  <div style={{fontSize:13,fontWeight:"bold",color:C.darkText,fontFamily:"Consolas,monospace"}}>
+                                    {!isNaN(g.v) ? g.v.toFixed(g.f) : "—"}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Apply button */}
+                  <div style={{display:"flex",gap:10,justifyContent:"flex-end",borderTop:"1px solid "+C.lightGray,paddingTop:14}}>
+                    <button onClick={onClose}
+                      style={{padding:"10px 20px",borderRadius:8,border:"1px solid "+C.lightGray,
+                        background:C.white,color:C.bodyText,fontSize:13,cursor:"pointer",fontWeight:500}}>
+                      Cancelar
+                    </button>
+                    <button onClick={() => {
+                        const updates = {};
+                        results.forEach(r => {
+                          if (!isNaN(r.price) && isFinite(r.price)) {
+                            updates[r.inst.id] = parseFloat(r.price.toFixed(4));
+                          }
+                        });
+                        onApply(updates);
+                        onClose();
+                      }}
+                      style={{padding:"10px 24px",borderRadius:8,border:"none",
+                        background:"linear-gradient(135deg,"+C.accent+","+C.deepBlue+")",
+                        color:C.white,fontSize:13,cursor:"pointer",fontWeight:"bold",
+                        boxShadow:"0 2px 8px rgba(0,180,216,0.3)",transition:"transform 0.1s"}}
+                      onMouseDown={e=>e.target.style.transform="scale(0.97)"}
+                      onMouseUp={e=>e.target.style.transform="scale(1)"}>
+                      ✓ Aplicar primas B-S a la estrategia
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    /* ══════════════════════════════════════
+       PAYOFF CHART
+       ══════════════════════════════════════ */
+    function PayoffChart({ instruments, range }) {
+      const [tip,setTip]=useState(null);
+      const W=700,H=400,m={t:25,r:25,b:45,l:55};
+      const cw=W-m.l-m.r, ch=H-m.t-m.b;
+
+      const data=useMemo(()=>{
+        const pts=[],step=(range[1]-range[0])/300;
+        for(let s=range[0];s<=range[1];s+=step){
+          const pt={s};let tot=0;
+          instruments.forEach((inst,i)=>{const v=poff(inst,s);pt["i"+i]=v;tot+=v;});
+          pt.total=tot;pts.push(pt);
+        }return pts;
+      },[instruments,range]);
+
+      const yVals=useMemo(()=>{
+        const v=[];data.forEach(d=>{v.push(d.total);instruments.forEach((_,i)=>v.push(d["i"+i]));});return v;
+      },[data,instruments]);
+
+      const yMin=Math.min(...yVals),yMax=Math.max(...yVals);
+      const yPad=Math.max((yMax-yMin)*0.15,5),yLo=yMin-yPad,yHi=yMax+yPad;
+      const sx=v=>m.l+((v-range[0])/(range[1]-range[0]))*cw;
+      const sy=v=>m.t+ch-((v-yLo)/(yHi-yLo))*ch;
+      const mkPath=key=>data.map((d,i)=>(i===0?"M":"L")+sx(d.s).toFixed(1)+","+sy(d[key]).toFixed(1)).join(" ");
+      const zeroY=sy(0),zInView=zeroY>=m.t&&zeroY<=m.t+ch;
+
+      function buildFill(cond){
+        if(!zInView)return "";
+        let path="",started=false;
+        data.forEach(d=>{
+          if(cond(d.total)){
+            if(!started){path+="M"+sx(d.s).toFixed(1)+","+zeroY.toFixed(1)+" ";started=true;}
+            path+="L"+sx(d.s).toFixed(1)+","+sy(d.total).toFixed(1)+" ";
+          } else if(started){path+="L"+sx(d.s).toFixed(1)+","+zeroY.toFixed(1)+" Z ";started=false;}
+        });
+        if(started)path+="L"+sx(data[data.length-1].s).toFixed(1)+","+zeroY.toFixed(1)+" Z";
+        return path;
+      }
+      const fillA=useMemo(()=>buildFill(v=>v>=0),[data,zInView,zeroY]);
+      const fillB=useMemo(()=>buildFill(v=>v<=0),[data,zInView,zeroY]);
+
+      const yTicks=useMemo(()=>{
+        const r=yHi-yLo;let step=5;
+        if(r>200)step=50;else if(r>100)step=20;else if(r>50)step=10;
+        const t=[];for(let v=Math.ceil(yLo/step)*step;v<=yHi;v+=step)t.push(v);return t;
+      },[yLo,yHi]);
+      const xTicks=useMemo(()=>{
+        const r=range[1]-range[0];let step=10;
+        if(r>200)step=50;else if(r>100)step=20;
+        const t=[];for(let v=Math.ceil(range[0]/step)*step;v<=range[1];v+=step)t.push(v);return t;
+      },[range]);
+
+      const onMove=useCallback(e=>{
+        const rect=e.currentTarget.getBoundingClientRect();
+        const x=((e.clientX-rect.left)/rect.width)*W;
+        const price=range[0]+((x-m.l)/cw)*(range[1]-range[0]);
+        if(price<range[0]||price>range[1]){setTip(null);return;}
+        const idx=Math.round(((price-range[0])/(range[1]-range[0]))*(data.length-1));
+        const d=data[Math.max(0,Math.min(idx,data.length-1))];
+        if(d)setTip({x,price:d.s,data:d});
+      },[data,range,cw]);
+
+      return (
+        <div style={{position:"relative"}}>
+          <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:"auto",display:"block"}}
+            onMouseMove={onMove} onMouseLeave={()=>setTip(null)}>
+            <rect width={W} height={H} fill={C.white} rx="8"/>
+            {yTicks.map(v=><line key={"yg"+v} x1={m.l} y1={sy(v)} x2={W-m.r} y2={sy(v)}
+              stroke={v===0?C.medGray:C.lightGray} strokeWidth={v===0?1.5:0.5} strokeDasharray={v===0?undefined:"4,4"}/>)}
+            {xTicks.map(v=><line key={"xg"+v} x1={sx(v)} y1={m.t} x2={sx(v)} y2={H-m.b}
+              stroke={C.lightGray} strokeWidth={0.5} strokeDasharray="4,4"/>)}
+            {fillA&&<path d={fillA} fill="rgba(16,185,129,0.12)"/>}
+            {fillB&&<path d={fillB} fill="rgba(239,68,68,0.10)"/>}
+            {instruments.map((inst,i)=><path key={inst.id} d={mkPath("i"+i)}
+              fill="none" stroke={IC[i%IC.length]} strokeWidth="1.5" strokeDasharray="6,3" opacity="0.6"/>)}
+            <path d={mkPath("total")} fill="none" stroke={C.navy} strokeWidth="3" strokeLinecap="round"/>
+            {instruments.filter(i=>i.type!=="bond").map((inst,i)=>{
+              const ci=instruments.indexOf(inst);
+              return <line key={"sk"+i} x1={sx(inst.strike)} y1={m.t} x2={sx(inst.strike)} y2={H-m.b}
+                stroke={IC[ci%IC.length]} strokeWidth="1" strokeDasharray="3,3" opacity="0.35"/>;
+            })}
+            <rect x={m.l} y={m.t} width={cw} height={ch} fill="none" stroke={C.medGray} strokeWidth="1"/>
+            {yTicks.map(v=><text key={"yl"+v} x={m.l-8} y={sy(v)+4} textAnchor="end" fontSize="10" fill={C.medGray} fontFamily="Calibri">{v>0?"+"+v:v}</text>)}
+            {xTicks.map(v=><text key={"xl"+v} x={sx(v)} y={H-m.b+16} textAnchor="middle" fontSize="10" fill={C.medGray} fontFamily="Calibri">{v}</text>)}
+            <text x={m.l+cw/2} y={H-4} textAnchor="middle" fontSize="11" fill={C.medGray} fontFamily="Trebuchet MS" fontWeight="bold">Precio del subyacente (S)</text>
+            <text x={12} y={m.t+ch/2} textAnchor="middle" fontSize="11" fill={C.medGray} fontFamily="Trebuchet MS" fontWeight="bold" transform={"rotate(-90,12,"+(m.t+ch/2)+")"}>P&L</text>
+            {tip&&tip.x>=m.l&&tip.x<=W-m.r&&<>
+              <line x1={tip.x} y1={m.t} x2={tip.x} y2={H-m.b} stroke={C.navy} strokeWidth="0.8" strokeDasharray="2,2" opacity="0.5"/>
+              <circle cx={tip.x} cy={sy(tip.data.total)} r="4" fill={C.navy}/>
+            </>}
+          </svg>
+          {tip&&<div style={{position:"absolute",top:10,left:Math.min(tip.x/W*100,62)+"%",
+            background:"rgba(15,27,61,0.95)",color:"#fff",borderRadius:8,padding:"8px 12px",fontSize:12,
+            fontFamily:"Calibri",pointerEvents:"none",minWidth:180,zIndex:10,boxShadow:"0 4px 12px rgba(0,0,0,0.3)"}}>
+            <div style={{fontWeight:"bold",marginBottom:4,color:C.accent}}>S = {tip.price.toFixed(1)}</div>
+            {instruments.map((inst,i)=><div key={inst.id} style={{display:"flex",justifyContent:"space-between",gap:12}}>
+              <span style={{color:IC[i%IC.length],fontSize:11}}>{lbl(inst)}</span>
+              <span style={{color:tip.data["i"+i]>=0?C.green:C.red,fontWeight:"bold"}}>
+                {tip.data["i"+i]>=0?"+":""}{tip.data["i"+i].toFixed(2)}</span>
+            </div>)}
+            <div style={{borderTop:"1px solid rgba(255,255,255,0.2)",marginTop:4,paddingTop:4,
+              display:"flex",justifyContent:"space-between",fontWeight:"bold"}}>
+              <span>Estrategia</span>
+              <span style={{color:tip.data.total>=0?C.green:C.red}}>
+                {tip.data.total>=0?"+":""}{tip.data.total.toFixed(2)}</span>
+            </div>
+          </div>}
+        </div>
+      );
+    }
+
+    /* ══════════════════════════════════════
+       INSTRUMENT ROW
+       ══════════════════════════════════════ */
+    function InstrumentRow({inst,index,onChange,onRemove,total}){
+      const color=IC[index%IC.length];
+      const needsK=["call","put","forward","stock"].includes(inst.type);
+      const needsP=["call","put"].includes(inst.type);
+      const isB=inst.type==="bond";
+      const ls={display:"flex",flexDirection:"column",gap:2,fontSize:10,color:C.medGray,fontWeight:"bold"};
+      const is={padding:"4px 6px",borderRadius:4,border:"1px solid "+C.lightGray,fontSize:13,fontFamily:"Calibri"};
+      const ss={padding:"5px 8px",borderRadius:6,border:"1px solid "+C.lightGray,fontSize:13,background:C.white,fontFamily:"Calibri",cursor:"pointer"};
+      return (
+        <div style={{display:"flex",flexWrap:"wrap",gap:8,alignItems:"center",padding:"10px 12px",borderRadius:8,
+          background:C.white,border:"2px solid "+color+"20",borderLeft:"4px solid "+color}}>
+          <span style={{fontWeight:"bold",color,fontSize:14,minWidth:24}}>#{index+1}</span>
+          <select value={inst.type} onChange={e=>onChange({...inst,type:e.target.value})} style={ss}>
+            {TYPES.map(t=><option key={t.v} value={t.v}>{t.i} {t.l}</option>)}
+          </select>
+          <select value={inst.position} onChange={e=>onChange({...inst,position:e.target.value})}
+            style={{...ss,width:130,color:inst.position==="long"?C.green:C.red,fontWeight:"bold"}}>
+            <option value="long">Compra (Long)</option>
+            <option value="short">Venta (Short)</option>
+          </select>
+          <label style={ls}>Cant.
+            <input type="number" min="1" max="100" value={inst.quantity}
+              onChange={e=>onChange({...inst,quantity:Math.max(1,parseInt(e.target.value)||1)})}
+              style={{...is,width:50}}/>
+          </label>
+          {needsK&&<label style={ls}>{inst.type==="stock"?"S₀":inst.type==="forward"?"F":"Strike (K)"}
+            <input type="number" value={inst.strike}
+              onChange={e=>onChange({...inst,strike:parseFloat(e.target.value)||0})}
+              style={{...is,width:70}}/>
+          </label>}
+          {needsP&&<label style={ls}>Prima
+            <input type="number" min="0" step="0.5" value={inst.premium}
+              onChange={e=>onChange({...inst,premium:parseFloat(e.target.value)||0})}
+              style={{...is,width:65,background:"#FFFBEB",border:"1px solid "+C.gold}}/>
+          </label>}
+          {isB&&<>
+            <label style={ls}>Nominal
+              <input type="number" value={inst.bondFace||100}
+                onChange={e=>onChange({...inst,bondFace:parseFloat(e.target.value)||100})}
+                style={{...is,width:65}}/>
+            </label>
+            <label style={ls}>Tipo (%)
+              <input type="number" step="0.1" value={inst.bondRate||3}
+                onChange={e=>onChange({...inst,bondRate:parseFloat(e.target.value)||0})}
+                style={{...is,width:55}}/>
+            </label>
+          </>}
+          <button onClick={onRemove} disabled={total<=1}
+            style={{marginLeft:"auto",background:"none",border:"none",
+              color:total<=1?C.lightGray:C.red,cursor:total<=1?"default":"pointer",fontSize:18,padding:"2px 6px"}}>✕</button>
+        </div>
+      );
+    }
+
+    /* ══════════════════════════════════════
+       METRICS + LEGEND + TABLE
+       ══════════════════════════════════════ */
+    function Metrics({instruments,range}){
+      const met=useMemo(()=>{
+        let mx=-Infinity,mn=Infinity;const be=[];let prev=null;
+        const step=(range[1]-range[0])/1000;
+        for(let s=range[0];s<=range[1];s+=step){
+          let tot=0;instruments.forEach(inst=>{tot+=poff(inst,s);});
+          if(tot>mx)mx=tot;if(tot<mn)mn=tot;
+          if(prev!==null&&((prev<0&&tot>=0)||(prev>=0&&tot<0)))be.push(s);
+          prev=tot;
+        }
+        const np=instruments.reduce((sum,inst)=>{
+          if(inst.type==="call"||inst.type==="put")return sum+(inst.position==="long"?-1:1)*inst.premium*(inst.quantity||1);
+          return sum;
+        },0);
+        return {mx,mn,be,np};
+      },[instruments,range]);
+      const fmt=v=>v>9999?"∞":v<-9999?"−∞":v.toFixed(2);
+      return (
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+          {[{l:"Beneficio Máx.",v:fmt(met.mx),c:C.green},{l:"Pérdida Máx.",v:fmt(met.mn),c:C.red},
+            {l:"Breakeven(s)",v:met.be.length>0?met.be.map(b=>b.toFixed(1)).join(", "):"N/A",c:C.gold},
+            {l:"Prima Neta",v:(met.np>=0?"+":"")+met.np.toFixed(2),c:met.np>=0?C.green:C.red}
+          ].map((m,i)=>(
+            <div key={i} style={{background:C.white,borderRadius:8,padding:"10px 12px",
+              borderLeft:"3px solid "+m.c,boxShadow:"0 1px 3px rgba(0,0,0,0.08)"}}>
+              <div style={{fontSize:10,color:C.medGray,fontWeight:"bold",textTransform:"uppercase",letterSpacing:0.5}}>{m.l}</div>
+              <div style={{fontSize:18,fontWeight:"bold",color:m.c,fontFamily:"Consolas,monospace",marginTop:2}}>{m.v}</div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+    function Legend({instruments}){
+      return (
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,alignItems:"center"}}>
+          <div style={{display:"flex",alignItems:"center",gap:5,marginRight:12}}>
+            <div style={{width:24,height:3,background:C.navy,borderRadius:2}}/>
+            <span style={{fontSize:11,fontWeight:"bold",color:C.navy}}>Estrategia</span>
+          </div>
+          {instruments.map((inst,i)=>(
+            <div key={inst.id} style={{display:"flex",alignItems:"center",gap:4}}>
+              <div style={{width:16,height:2,background:IC[i%IC.length],borderRadius:1,opacity:0.7}}/>
+              <span style={{fontSize:10,color:C.bodyText}}>{lbl(inst)}</span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+    function DetailTable({instruments}){
+      const ths={padding:"6px 8px",textAlign:"left",fontWeight:"bold",fontSize:11};
+      const tds={padding:"6px 8px",borderBottom:"1px solid "+C.lightGray};
+      return (
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+          <thead><tr style={{background:C.navy,color:C.white}}>
+            <th style={ths}>#</th><th style={ths}>Instrumento</th><th style={ths}>Tipo</th>
+            <th style={ths}>Posición</th><th style={ths}>Cant.</th><th style={ths}>Strike/S₀</th>
+            <th style={ths}>Prima</th><th style={ths}>Fórmula P&L</th>
+          </tr></thead>
+          <tbody>{instruments.map((inst,i)=>{
+            const color=IC[i%IC.length];const pos=inst.position==="long"?"Compra":"Venta";
+            const sign=inst.position==="long"?"":"−";let f="";
+            switch(inst.type){
+              case "call":f=sign+"[max(S−"+inst.strike+",0) − "+inst.premium+"]";break;
+              case "put":f=sign+"[max("+inst.strike+"−S,0) − "+inst.premium+"]";break;
+              case "forward":f=sign+"(S − "+inst.strike+")";break;
+              case "stock":f=sign+"(S − "+inst.strike+")";break;
+              case "bond":f=sign+(inst.bondFace||100)+"×(1+"+(inst.bondRate||3)+"%)";break;
+            }
+            if(inst.quantity>1)f=inst.quantity+"×"+f;
+            const tl=TYPES.find(t=>t.v===inst.type);
+            return (
+              <tr key={inst.id} style={{background:i%2===0?"#DBEAFE40":C.white}}>
+                <td style={{...tds,fontWeight:"bold",color}}>{i+1}</td>
+                <td style={{...tds,color}}>{lbl(inst)}</td>
+                <td style={tds}>{tl.i} {tl.l}</td>
+                <td style={{...tds,color:inst.position==="long"?C.green:C.red,fontWeight:"bold"}}>{pos}</td>
+                <td style={{...tds,textAlign:"center"}}>{inst.quantity}</td>
+                <td style={{...tds,textAlign:"center",fontWeight:"bold"}}>{inst.type==="bond"?(inst.bondFace||100):inst.strike}</td>
+                <td style={{...tds,textAlign:"center"}}>{["call","put"].includes(inst.type)?inst.premium:"—"}</td>
+                <td style={{...tds,fontFamily:"Consolas,monospace",fontSize:11}}>{f}</td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      );
+    }
+
+    /* ══════════════════════════════════════
+       APP
+       ══════════════════════════════════════ */
+    function App(){
+      const [instruments,setInstruments]=useState([
+        mkInst({type:"call",position:"long",strike:100,premium:6}),
+        mkInst({type:"put",position:"long",strike:100,premium:5}),
+      ]);
+      const [rMin,setRMin]=useState(50);
+      const [rMax,setRMax]=useState(150);
+      const [bsOpen,setBsOpen]=useState(false);
+
+      const add=()=>setInstruments([...instruments,mkInst()]);
+      const upd=(i,u)=>{const n=[...instruments];n[i]=u;setInstruments(n);};
+      const rem=i=>{if(instruments.length<=1)return;setInstruments(instruments.filter((_,j)=>j!==i));};
+      const clear=()=>setInstruments([mkInst()]);
+      const loadPreset=p=>{
+        setInstruments(p.ins.map(x=>mkInst(x)));
+        const strikes=p.ins.filter(x=>x.type!=="bond").map(x=>x.strike);
+        const lo=Math.min(...strikes),hi=Math.max(...strikes);
+        const pad=Math.max((hi-lo)*0.6,30);
+        setRMin(Math.round(lo-pad));setRMax(Math.round(hi+pad));
+      };
+
+      const applyBS = (updates) => {
+        setInstruments(prev => prev.map(inst => {
+          if (updates[inst.id] !== undefined) {
+            return { ...inst, premium: updates[inst.id] };
+          }
+          return inst;
+        }));
+      };
+
+      const ls={display:"flex",flexDirection:"column",gap:2,fontSize:10,color:C.medGray,fontWeight:"bold"};
+      const is={padding:"4px 6px",borderRadius:4,border:"1px solid "+C.lightGray,fontSize:13,fontFamily:"Calibri"};
+
+      const hasOptions = instruments.some(i => i.type === "call" || i.type === "put");
+
+      return (
+        <div style={{fontFamily:"Calibri,sans-serif",background:C.offWhite,minHeight:"100vh"}}>
+          <BSModal open={bsOpen} onClose={()=>setBsOpen(false)} instruments={instruments} onApply={applyBS}/>
+
+          {/* Header */}
+          <div style={{background:"linear-gradient(135deg,"+C.navy+","+C.deepBlue+")",padding:"14px 24px",color:C.white}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",maxWidth:1200,margin:"0 auto"}}>
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:28}}>📊</span>
+                <div>
+                  <h1 style={{margin:0,fontSize:22,fontFamily:"Trebuchet MS,sans-serif"}}>
+                    Constructor de Estrategias con Derivados</h1>
+                  <p style={{margin:0,fontSize:12,color:C.medGray}}>
+                    Combina Calls, Puts, Forwards, Acciones y Bonos — visualiza el payoff en tiempo real</p>
+                </div>
+              </div>
+              <button onClick={()=>setBsOpen(true)}
+                style={{padding:"8px 16px",borderRadius:8,border:"2px solid "+C.gold,
+                  background:"transparent",color:C.gold,fontSize:13,cursor:"pointer",
+                  fontWeight:"bold",display:"flex",alignItems:"center",gap:6,
+                  transition:"all 0.15s",whiteSpace:"nowrap"}}
+                onMouseEnter={e=>{e.currentTarget.style.background=C.gold;e.currentTarget.style.color=C.navy;}}
+                onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.color=C.gold;}}>
+                ⚡ Black-Scholes
+              </button>
+            </div>
+          </div>
+
+          <div style={{display:"grid",gridTemplateColumns:"380px 1fr",gap:0,maxWidth:1200,margin:"0 auto"}}>
+            {/* LEFT */}
+            <div style={{padding:"16px",background:C.white,borderRight:"1px solid "+C.lightGray,
+              overflowY:"auto",maxHeight:"calc(100vh - 62px)"}}>
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:11,fontWeight:"bold",color:C.medGray,textTransform:"uppercase",
+                  letterSpacing:0.5,marginBottom:6}}>Estrategias predefinidas</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                  {PRESETS.map(p=>(
+                    <button key={p.name} onClick={()=>loadPreset(p)} title={p.desc}
+                      style={{padding:"4px 8px",borderRadius:6,border:"1px solid "+C.lightGray,
+                        background:C.offWhite,fontSize:11,cursor:"pointer",color:C.deepBlue,fontWeight:500,
+                        transition:"all 0.15s"}}
+                      onMouseEnter={e=>{e.target.style.background=C.accent;e.target.style.color="#fff";e.target.style.borderColor=C.accent;}}
+                      onMouseLeave={e=>{e.target.style.background=C.offWhite;e.target.style.color=C.deepBlue;e.target.style.borderColor=C.lightGray;}}
+                    >{p.name}</button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{fontSize:11,fontWeight:"bold",color:C.medGray,textTransform:"uppercase",
+                letterSpacing:0.5,marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span>Instrumentos ({instruments.length})</span>
+                <button onClick={clear} style={{background:"none",border:"none",color:C.red,
+                  fontSize:10,cursor:"pointer",textDecoration:"underline"}}>Limpiar</button>
+              </div>
+
+              <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:12}}>
+                {instruments.map((inst,i)=>(
+                  <InstrumentRow key={inst.id} inst={inst} index={i}
+                    onChange={u=>upd(i,u)} onRemove={()=>rem(i)} total={instruments.length}/>
+                ))}
+              </div>
+
+              <button onClick={add}
+                style={{width:"100%",padding:"8px",borderRadius:8,border:"2px dashed "+C.accent,
+                  background:C.accent+"10",color:C.accent,fontWeight:"bold",fontSize:13,cursor:"pointer",
+                  transition:"all 0.15s",marginBottom:8}}
+                onMouseEnter={e=>{e.target.style.background=C.accent;e.target.style.color="#fff";}}
+                onMouseLeave={e=>{e.target.style.background=C.accent+"10";e.target.style.color=C.accent;}}
+              >+ Añadir Instrumento</button>
+
+              {/* B-S shortcut in panel */}
+              {hasOptions && (
+                <button onClick={()=>setBsOpen(true)}
+                  style={{width:"100%",padding:"8px",borderRadius:8,border:"2px solid "+C.gold+"60",
+                    background:C.gold+"10",color:C.gold,fontWeight:"bold",fontSize:12,cursor:"pointer",
+                    transition:"all 0.15s",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}
+                  onMouseEnter={e=>{e.target.style.background=C.gold;e.target.style.color=C.navy;}}
+                  onMouseLeave={e=>{e.target.style.background=C.gold+"10";e.target.style.color=C.gold;}}>
+                  ⚡ Calcular primas con Black-Scholes
+                </button>
+              )}
+
+              <div style={{marginTop:14,padding:"10px 12px",background:C.offWhite,borderRadius:8}}>
+                <div style={{fontSize:11,fontWeight:"bold",color:C.medGray,textTransform:"uppercase",
+                  letterSpacing:0.5,marginBottom:6}}>Rango de precios</div>
+                <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                  <label style={ls}>Mínimo
+                    <input type="number" value={rMin} onChange={e=>setRMin(parseFloat(e.target.value)||0)} style={{...is,width:65}}/>
+                  </label>
+                  <span style={{color:C.medGray,marginTop:14}}>—</span>
+                  <label style={ls}>Máximo
+                    <input type="number" value={rMax} onChange={e=>setRMax(parseFloat(e.target.value)||200)} style={{...is,width:65}}/>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            {/* RIGHT */}
+            <div style={{padding:"16px 20px",overflowY:"auto",maxHeight:"calc(100vh - 62px)"}}>
+              <Metrics instruments={instruments} range={[rMin,rMax]}/>
+              <div style={{marginTop:12,background:C.white,borderRadius:10,padding:12,boxShadow:"0 2px 8px rgba(0,0,0,0.06)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <span style={{fontSize:15,fontWeight:"bold",color:C.navy,fontFamily:"Trebuchet MS"}}>
+                    Diagrama de Payoff al Vencimiento</span>
+                  <span style={{fontSize:10,color:C.medGray,fontStyle:"italic"}}>
+                    Pasa el ratón sobre el gráfico</span>
+                </div>
+                <PayoffChart instruments={instruments} range={[rMin,rMax]}/>
+                <div style={{marginTop:8}}><Legend instruments={instruments}/></div>
+              </div>
+              <div style={{marginTop:12,background:C.white,borderRadius:10,padding:"14px 16px",boxShadow:"0 2px 8px rgba(0,0,0,0.06)"}}>
+                <div style={{fontSize:14,fontWeight:"bold",color:C.navy,fontFamily:"Trebuchet MS",marginBottom:10}}>
+                  Detalle por Instrumento</div>
+                <DetailTable instruments={instruments}/>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App/>,document.getElementById("root"));
+  </script>
+</body>
+</html>
